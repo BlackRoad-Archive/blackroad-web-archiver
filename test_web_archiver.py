@@ -79,7 +79,7 @@ class TestWebArchiver(unittest.TestCase):
         class MockRespB:
             status = 200
             headers = {}
-            def read(self): return b"<html><body>Version B — completely different</body></html>"
+            def read(self): return b"<html><body>Version B - completely different</body></html>"
             def __enter__(self): return self
             def __exit__(self, *a): pass
 
