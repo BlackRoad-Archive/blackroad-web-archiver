@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -136,7 +136,7 @@ class WebArchiver:
 
     def register_site(self, url: str, name: str, category: str = "general") -> Site:
         sid = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         # Normalize URL
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
@@ -158,7 +158,7 @@ class WebArchiver:
             url = "https://" + url
 
         snap_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         # Fetch page
         status_code = 0
@@ -243,7 +243,7 @@ class WebArchiver:
 
         # Persist diff report
         did = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with get_conn() as conn:
             conn.execute(
                 "INSERT INTO diff_reports(id, site_id, snap_a_id, snap_b_id, diff_type, changes, created_at) "

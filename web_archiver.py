@@ -55,7 +55,7 @@ class ArchiveJob:
 
 
 def _now() -> str:
-    return datetime.datetime.utcnow().isoformat() + "Z"
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def _sha256(data: bytes) -> str:
@@ -63,7 +63,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _job_id(url: str) -> str:
-    ts = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
     short = hashlib.sha256(url.encode()).hexdigest()[:8]
     return f"{ts}_{short}"
 
@@ -73,7 +73,8 @@ def _job_id(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def get_db(path: str = DB_PATH) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     _init_db(conn)
@@ -225,6 +226,9 @@ def _same_origin(url1: str, url2: str) -> bool:
 
 def _fetch_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> Tuple[bytes, int, Dict[str, str]]:
     """Fetch URL, return (body_bytes, status_code, headers)."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http and https URLs are supported, got: {parsed.scheme!r}")
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
@@ -251,10 +255,11 @@ def store_snapshot(job_id: str, url: str, content: bytes) -> str:
 def retrieve(job_id: str, db_path: str = DB_PATH) -> Optional[ArchiveJob]:
     """Retrieve an archive job by ID."""
     conn = get_db(db_path)
-    row = conn.execute("SELECT * FROM archive_jobs WHERE id = ?", (job_id,)).fetchone()
-    if row:
-        return ArchiveJob.from_row(row)
-    return None
+    try:
+        row = conn.execute("SELECT * FROM archive_jobs WHERE id = ?", (job_id,)).fetchone()
+        return ArchiveJob.from_row(row) if row else None
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -275,101 +280,104 @@ def archive(
     job_id = _job_id(url)
     now = _now()
 
-    # Insert pending job
-    conn.execute("""
-        INSERT INTO archive_jobs (id, url, created_at, status, crawl_depth)
-        VALUES (?, ?, ?, 'pending', ?)
-    """, (job_id, url, now, depth))
-    conn.commit()
-
     try:
-        body, status_code, headers = _fetch_url(url)
-        if status_code >= 400:
-            raise RuntimeError(f"HTTP {status_code} for {url}")
-
-        html_text = body.decode("utf-8", errors="replace")
-        title = extract_title(html_text)
-        checksum = _sha256(body)
-        snap_path = store_snapshot(job_id, url, body)
-        all_links = extract_links(html_text, url)
-
-        # Store root crawl
+        # Insert pending job
         conn.execute("""
-            INSERT OR IGNORE INTO crawled_pages (job_id, url, depth, checksum, status_code, crawled_at)
-            VALUES (?, ?, 0, ?, ?, ?)
-        """, (job_id, url, checksum, status_code, now))
+            INSERT INTO archive_jobs (id, url, created_at, status, crawl_depth)
+            VALUES (?, ?, ?, 'pending', ?)
+        """, (job_id, url, now, depth))
+        conn.commit()
 
-        # Store links
-        for link_url, link_text in all_links:
+        try:
+            body, status_code, headers = _fetch_url(url)
+            if status_code >= 400:
+                raise RuntimeError(f"HTTP {status_code} for {url}")
+
+            html_text = body.decode("utf-8", errors="replace")
+            title = extract_title(html_text)
+            checksum = _sha256(body)
+            snap_path = store_snapshot(job_id, url, body)
+            all_links = extract_links(html_text, url)
+
+            # Store root crawl
             conn.execute("""
-                INSERT INTO extracted_links (job_id, page_url, link_url, link_text, depth)
-                VALUES (?, ?, ?, ?, 0)
-            """, (job_id, url, link_url, link_text[:200]))
+                INSERT OR IGNORE INTO crawled_pages (job_id, url, depth, checksum, status_code, crawled_at)
+                VALUES (?, ?, 0, ?, ?, ?)
+            """, (job_id, url, checksum, status_code, now))
 
-        # Crawl deeper if requested
-        crawl_queue: List[Tuple[str, int]] = [(link_url, 1) for link_url, _ in all_links
-                                               if (not same_origin_only or _same_origin(url, link_url))]
-        visited: Set[str] = {url}
+            # Store links
+            for link_url, link_text in all_links:
+                conn.execute("""
+                    INSERT INTO extracted_links (job_id, page_url, link_url, link_text, depth)
+                    VALUES (?, ?, ?, ?, 0)
+                """, (job_id, url, link_url, link_text[:200]))
 
-        for _ in range(depth - 1):
-            next_queue: List[Tuple[str, int]] = []
-            for link_url, current_depth in crawl_queue:
-                if link_url in visited or current_depth >= depth:
-                    continue
-                visited.add(link_url)
-                try:
-                    sub_body, sub_status, _ = _fetch_url(link_url, timeout=10)
-                    sub_html = sub_body.decode("utf-8", errors="replace")
-                    sub_checksum = _sha256(sub_body)
-                    store_snapshot(job_id, link_url, sub_body)
-                    sub_links = extract_links(sub_html, link_url)
-                    conn.execute("""
-                        INSERT OR IGNORE INTO crawled_pages
-                            (job_id, url, depth, checksum, status_code, crawled_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (job_id, link_url, current_depth, sub_checksum, sub_status, _now()))
-                    for sl_url, sl_text in sub_links:
+            # Crawl deeper if requested
+            crawl_queue: List[Tuple[str, int]] = [(link_url, 1) for link_url, _ in all_links
+                                                   if (not same_origin_only or _same_origin(url, link_url))]
+            visited: Set[str] = {url}
+
+            for _ in range(depth - 1):
+                next_queue: List[Tuple[str, int]] = []
+                for link_url, current_depth in crawl_queue:
+                    if link_url in visited or current_depth >= depth:
+                        continue
+                    visited.add(link_url)
+                    try:
+                        sub_body, sub_status, _ = _fetch_url(link_url, timeout=10)
+                        sub_html = sub_body.decode("utf-8", errors="replace")
+                        sub_checksum = _sha256(sub_body)
+                        store_snapshot(job_id, link_url, sub_body)
+                        sub_links = extract_links(sub_html, link_url)
                         conn.execute("""
-                            INSERT INTO extracted_links (job_id, page_url, link_url, link_text, depth)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (job_id, link_url, sl_url, sl_text[:200], current_depth))
-                        if not same_origin_only or _same_origin(url, sl_url):
-                            next_queue.append((sl_url, current_depth + 1))
-                except Exception:
-                    pass
-            crawl_queue = next_queue
+                            INSERT OR IGNORE INTO crawled_pages
+                                (job_id, url, depth, checksum, status_code, crawled_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (job_id, link_url, current_depth, sub_checksum, sub_status, _now()))
+                        for sl_url, sl_text in sub_links:
+                            conn.execute("""
+                                INSERT INTO extracted_links (job_id, page_url, link_url, link_text, depth)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (job_id, link_url, sl_url, sl_text[:200], current_depth))
+                            if not same_origin_only or _same_origin(url, sl_url):
+                                next_queue.append((sl_url, current_depth + 1))
+                    except Exception:
+                        pass
+                crawl_queue = next_queue
 
-        total_links = conn.execute(
-            "SELECT COUNT(*) FROM extracted_links WHERE job_id = ?", (job_id,)
-        ).fetchone()[0]
+            total_links = conn.execute(
+                "SELECT COUNT(*) FROM extracted_links WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
 
-        conn.execute("""
-            UPDATE archive_jobs SET
-                title = ?, snapshot_html = ?, checksum = ?,
-                status = 'success', content_length = ?, links_found = ?
-            WHERE id = ?
-        """, (title, snap_path, checksum, len(body), total_links, job_id))
-        conn.commit()
+            conn.execute("""
+                UPDATE archive_jobs SET
+                    title = ?, snapshot_html = ?, checksum = ?,
+                    status = 'success', content_length = ?, links_found = ?
+                WHERE id = ?
+            """, (title, snap_path, checksum, len(body), total_links, job_id))
+            conn.commit()
 
-        return ArchiveJob(
-            id=job_id, url=url, title=title, snapshot_html=snap_path,
-            screenshot_path="", crawl_depth=depth, created_at=now,
-            checksum=checksum, status="success",
-            content_length=len(body), links_found=total_links, error_message=""
-        )
+            return ArchiveJob(
+                id=job_id, url=url, title=title, snapshot_html=snap_path,
+                screenshot_path="", crawl_depth=depth, created_at=now,
+                checksum=checksum, status="success",
+                content_length=len(body), links_found=total_links, error_message=""
+            )
 
-    except Exception as exc:
-        msg = str(exc)
-        conn.execute("""
-            UPDATE archive_jobs SET status = 'failed', error_message = ? WHERE id = ?
-        """, (msg, job_id))
-        conn.commit()
-        return ArchiveJob(
-            id=job_id, url=url, title="", snapshot_html="",
-            screenshot_path="", crawl_depth=depth, created_at=now,
-            checksum="", status="failed",
-            content_length=0, links_found=0, error_message=msg
-        )
+        except Exception as exc:
+            msg = str(exc)
+            conn.execute("""
+                UPDATE archive_jobs SET status = 'failed', error_message = ? WHERE id = ?
+            """, (msg, job_id))
+            conn.commit()
+            return ArchiveJob(
+                id=job_id, url=url, title="", snapshot_html="",
+                screenshot_path="", crawl_depth=depth, created_at=now,
+                checksum="", status="failed",
+                content_length=0, links_found=0, error_message=msg
+            )
+    finally:
+        conn.close()
 
 
 def export_bundle(job_id: str, output_path: Optional[str] = None, db_path: str = DB_PATH) -> str:
@@ -384,10 +392,13 @@ def export_bundle(job_id: str, output_path: Optional[str] = None, db_path: str =
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
         # Write manifest
         conn = get_db(db_path)
-        pages = conn.execute(
-            "SELECT url, depth, checksum, status_code FROM crawled_pages WHERE job_id = ?",
-            (job_id,)
-        ).fetchall()
+        try:
+            pages = conn.execute(
+                "SELECT url, depth, checksum, status_code FROM crawled_pages WHERE job_id = ?",
+                (job_id,)
+            ).fetchall()
+        finally:
+            conn.close()
         manifest = {
             "job": job.to_dict(),
             "pages": [dict(p) for p in pages],
@@ -443,43 +454,52 @@ def list_jobs(
     db_path: str = DB_PATH,
 ) -> List[ArchiveJob]:
     conn = get_db(db_path)
-    query = "SELECT * FROM archive_jobs"
-    params: List[Any] = []
-    if status:
-        query += " WHERE status = ?"
-        params.append(status)
-    query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
-    return [ArchiveJob.from_row(r) for r in conn.execute(query, params).fetchall()]
+    try:
+        query = "SELECT * FROM archive_jobs"
+        params: List[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [ArchiveJob.from_row(r) for r in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
 
 
 def get_job_links(job_id: str, db_path: str = DB_PATH) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
-    rows = conn.execute("""
-        SELECT link_url, link_text, depth FROM extracted_links
-        WHERE job_id = ? ORDER BY depth, link_url
-    """, (job_id,)).fetchall()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute("""
+            SELECT link_url, link_text, depth FROM extracted_links
+            WHERE job_id = ? ORDER BY depth, link_url
+        """, (job_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def stats(db_path: str = DB_PATH) -> Dict[str, Any]:
     conn = get_db(db_path)
-    total = conn.execute("SELECT COUNT(*) FROM archive_jobs").fetchone()[0]
-    success = conn.execute("SELECT COUNT(*) FROM archive_jobs WHERE status='success'").fetchone()[0]
-    failed = conn.execute("SELECT COUNT(*) FROM archive_jobs WHERE status='failed'").fetchone()[0]
-    total_size = conn.execute(
-        "SELECT COALESCE(SUM(content_length), 0) FROM archive_jobs"
-    ).fetchone()[0]
-    total_links = conn.execute("SELECT COUNT(*) FROM extracted_links").fetchone()[0]
-    pages_crawled = conn.execute("SELECT COUNT(*) FROM crawled_pages").fetchone()[0]
-    return {
-        "total_jobs": total,
-        "successful": success,
-        "failed": failed,
-        "total_content_bytes": total_size,
-        "total_links_extracted": total_links,
-        "total_pages_crawled": pages_crawled,
-    }
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM archive_jobs").fetchone()[0]
+        success = conn.execute("SELECT COUNT(*) FROM archive_jobs WHERE status='success'").fetchone()[0]
+        failed = conn.execute("SELECT COUNT(*) FROM archive_jobs WHERE status='failed'").fetchone()[0]
+        total_size = conn.execute(
+            "SELECT COALESCE(SUM(content_length), 0) FROM archive_jobs"
+        ).fetchone()[0]
+        total_links = conn.execute("SELECT COUNT(*) FROM extracted_links").fetchone()[0]
+        pages_crawled = conn.execute("SELECT COUNT(*) FROM crawled_pages").fetchone()[0]
+        return {
+            "total_jobs": total,
+            "successful": success,
+            "failed": failed,
+            "total_content_bytes": total_size,
+            "total_links_extracted": total_links,
+            "total_pages_crawled": pages_crawled,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
