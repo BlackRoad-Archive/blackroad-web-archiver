@@ -1,61 +1,20 @@
 # blackroad-web-archiver
 
-Production-grade web snapshot tool. Archives URLs with SHA-256 checksums, link extraction, and ZIP bundle export. Uses Python stdlib only (no requests).
+Web page archiving and snapshot comparison
 
-## Features
+## Organization
 
-- Archive any URL with configurable crawl depth
-- SHA-256 checksumming of every snapshot
-- Extract all links from HTML pages
-- Same-origin crawl filtering
-- Compare two snapshots with unified diff
-- Export job bundle as ZIP archive
-- SQLite persistence in `~/.blackroad/web_archiver.db`
+**BlackRoad-Archive** — Preservation — IPFS, backups, archiving
 
-## Usage
+## BlackRoad OS
 
-```bash
-# Archive a URL (depth 1)
-python web_archiver.py archive https://example.com
+BlackRoad OS is a distributed AI operating system — 20 domains, 668 repositories, 1,000 AI agents, and sovereign infrastructure running on Raspberry Pis and Hailo-8 accelerators. No cloud dependency.
 
-# Archive with crawl depth 2
-python web_archiver.py archive https://example.com --depth 2
+- [blackroad.io](https://blackroad.io) — Main platform
+- [docs.blackroad.io](https://docs.blackroad.io) — Documentation
+- [GitHub](https://github.com/BlackRoad-Archive) — This organization
 
-# List all archived jobs
-python web_archiver.py list
+**Language:** Python
 
-# Get job details
-python web_archiver.py get <job-id>
 
-# Export as ZIP
-python web_archiver.py export <job-id> --output archive.zip
-
-# Compare two snapshots
-python web_archiver.py compare <job-id-1> <job-id-2>
-
-# Show extracted links
-python web_archiver.py links <job-id>
-```
-
-## Testing
-
-```bash
-pip install pytest
-pytest tests/ -v
-```
-
-## Architecture
-
-- **`web_archiver.py`** — Core library + CLI (450+ lines)
-- **SQLite tables**: `archive_jobs`, `crawled_pages`, `extracted_links`
-- **No external dependencies** — uses `urllib.request`, `html.parser`, `difflib`
-
----
-
-**Proprietary Software — BlackRoad OS, Inc.**
-
-This software is proprietary to BlackRoad OS, Inc. Source code is publicly visible for transparency and collaboration. Commercial use, forking, and redistribution are prohibited without written authorization.
-
-**BlackRoad OS — Pave Tomorrow.**
-
-*Copyright 2024-2026 BlackRoad OS, Inc. All Rights Reserved.*
+*© 2024-2026 BlackRoad OS, Inc. All Rights Reserved.*
